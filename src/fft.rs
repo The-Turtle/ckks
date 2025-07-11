@@ -1,11 +1,19 @@
+//! Fast Fourier Transform (FFT) implementation for complex numbers and convolution operations.
+//! This module provides efficient FFT, inverse FFT, and convolution functions for both 1D and 2D data.
+
 use num_complex::Complex;
 use once_cell::sync::Lazy;
 use std::f64::consts::PI;
 
+/// Maximum number of bits for cached roots of unity (2^11 = 2048 values)
 const ROOTS_CACHE_SIZE: usize = 11;
 
+/// Tau constant (2π) for angle calculations
 const TAU: f64 = 2.0 * PI;
 
+/// Pre-computed roots of unity for efficient FFT computation.
+/// These are the complex numbers e^(2πik/n) for k = 0, 1, ..., n-1 where n = 2^ROOTS_CACHE_SIZE.
+/// Cached to avoid recomputation during FFT operations.
 static ROOTS_OF_UNITY: Lazy<Vec<Complex<f64>>> = Lazy::new(|| {
     let n = 1 << ROOTS_CACHE_SIZE;
     (0..n)
@@ -16,13 +24,31 @@ static ROOTS_OF_UNITY: Lazy<Vec<Complex<f64>>> = Lazy::new(|| {
         .collect()
 });
 
-pub fn root_of_unity(k: i64, bits: usize) -> &'static Complex<f64> {
+/// Of the 2^bit 2^bit-th roots of unity, returns the k^th one,
+/// which equals e^(2πik/2^bits). Uses pre-computed values from
+/// the ROOTS_OF_UNITY cache for efficiency.
+///
+/// # Arguments
+/// * `k` - The index of the root of unity
+/// * `bits` - Log2 of the FFT size (must be <= ROOTS_CACHE_SIZE)
+///
+/// # Returns
+/// The complex number e^(2πik/2^bits)
+pub fn root_of_unity(k: i64, bits: usize) -> Complex<f64> {
     debug_assert!(bits <= ROOTS_CACHE_SIZE);
     let mask = (1 << bits) - 1;
     let i = (k & mask) as usize;
-    &ROOTS_OF_UNITY[i << (ROOTS_CACHE_SIZE - bits)]
+    ROOTS_OF_UNITY[i << (ROOTS_CACHE_SIZE - bits)]
 }
 
+/// Core FFT/IFFT implementation using Cooley-Tukey divide-and-conquer algorithm.
+///
+/// # Arguments
+/// * `input` - Input vector of complex numbers (length must be power of 2)
+/// * `is_inverse` - If true, performs inverse FFT; if false, performs forward FFT
+///
+/// # Returns
+/// Transformed vector of complex numbers
 fn transform(input: Vec<Complex<f64>>, is_inverse: bool) -> Vec<Complex<f64>> {
     let n = input.len();
     debug_assert!(n.is_power_of_two());
@@ -57,16 +83,42 @@ fn transform(input: Vec<Complex<f64>>, is_inverse: bool) -> Vec<Complex<f64>> {
     output
 }
 
+/// Computes the Fast Fourier Transform of the input vector.
+///
+/// # Arguments
+/// * `input` - Vector of complex numbers (length must be power of 2)
+///
+/// # Returns
+/// FFT of the input vector
 pub fn fft(input: Vec<Complex<f64>>) -> Vec<Complex<f64>> {
     transform(input, false)
 }
 
+/// Computes the Inverse Fast Fourier Transform of the input vector.
+///
+/// # Arguments
+/// * `input` - Vector of complex numbers (length must be power of 2)
+///
+/// # Returns
+/// Inverse FFT of the input vector
 pub fn ifft(input: Vec<Complex<f64>>) -> Vec<Complex<f64>> {
     transform(input, true)
 }
 
+/// Computes the convolution of two complex vectors using FFT.
+/// Uses the convolution theorem: convolution in time domain = multiplication
+/// in frequency domain.
+/// The input vectors must have lengths whose sum is at most 2^ROOTS_CACHE_SIZE+1.
+///
+/// # Arguments
+/// * `a` - First input vector
+/// * `b` - Second input vector
+///
+/// # Returns
+/// Convolution result a * b
 fn convolve_complex(mut a: Vec<Complex<f64>>, mut b: Vec<Complex<f64>>) -> Vec<Complex<f64>> {
     let n = (a.len() + b.len() - 1).next_power_of_two();
+    debug_assert!(n <= 1 << ROOTS_CACHE_SIZE, "Input vectors are too long");
     a.resize(n, Complex::new(0.0, 0.0));
     b.resize(n, Complex::new(0.0, 0.0));
     let fft_a = fft(a);
@@ -82,6 +134,16 @@ fn convolve_complex(mut a: Vec<Complex<f64>>, mut b: Vec<Complex<f64>>) -> Vec<C
     c
 }
 
+/// Computes the convolution of two integer vectors using FFT.
+/// Converts integers to complex numbers, performs complex convolution, then converts back.
+/// If the inputs are too long or too large, the convolution may have rounding issues.
+///
+/// # Arguments
+/// * `a` - First input vector of integers
+/// * `b` - Second input vector of integers
+///
+/// # Returns
+/// Convolution result as a vector of integers
 pub fn convolve_int(a: &Vec<u64>, b: &Vec<u64>) -> Vec<u64> {
     let a_as_complex = a
         .into_iter()
@@ -95,6 +157,15 @@ pub fn convolve_int(a: &Vec<u64>, b: &Vec<u64>) -> Vec<u64> {
     c.into_iter().map(|x| x.re.round() as u64).collect()
 }
 
+/// 2D FFT/IFFT implementation using row-column decomposition.
+/// Applies 1D transforms to each row, then to each column of the result.
+///
+/// # Arguments
+/// * `input` - 2D matrix of complex numbers (dimensions must be powers of 2)
+/// * `is_inverse` - If true, performs inverse 2D FFT; if false, performs forward 2D FFT
+///
+/// # Returns
+/// 2D transformed matrix
 fn transform_2d(input: Vec<Vec<Complex<f64>>>, is_inverse: bool) -> Vec<Vec<Complex<f64>>> {
     let n = input.len();
     debug_assert!(n.is_power_of_two(), "Row count must be a power of two");
@@ -123,14 +194,28 @@ fn transform_2d(input: Vec<Vec<Complex<f64>>>, is_inverse: bool) -> Vec<Vec<Comp
         .collect()
 }
 
+/// Computes the 2D Fourier Transform of the input matrix.
 fn fft_2d(input: Vec<Vec<Complex<f64>>>) -> Vec<Vec<Complex<f64>>> {
     transform_2d(input, false)
 }
 
+/// Computes the 2D Inverse Fourier Transform of the input matrix.
 fn ifft_2d(input: Vec<Vec<Complex<f64>>>) -> Vec<Vec<Complex<f64>>> {
     transform_2d(input, true)
 }
 
+/// Computes the 2D convolution of two complex matrices using 2D FFT.
+/// Extends the convolution theorem to 2D: 2D convolution = element-wise
+/// multiplication in 2D frequency domain. The input matrices row counts
+/// whose sum is at most 2^ROOTS_CACHE_SIZE+1, and the maximum sum of column
+/// counts must also be at most 2^ROOTS_CACHE_SIZE+1.
+///
+/// # Arguments
+/// * `a` - First input matrix
+/// * `b` - Second input matrix
+///
+/// # Returns
+/// 2D convolution result
 fn convolve_complex_2d(
     mut a: Vec<Vec<Complex<f64>>>,
     mut b: Vec<Vec<Complex<f64>>>,
@@ -141,6 +226,8 @@ fn convolve_complex_2d(
     let b_col_count = b.iter().map(|row| row.len()).max().unwrap_or(0);
     let n = (a_row_count + b_row_count - 1).next_power_of_two();
     let m = (a_col_count + b_col_count - 1).next_power_of_two();
+    debug_assert!(n <= 2 << ROOTS_CACHE_SIZE, "Input matrices are too large");
+    debug_assert!(m <= 2 << ROOTS_CACHE_SIZE, "Input matrices are too large");
 
     a.resize(n, vec![Complex::new(0.0, 0.0); m]);
     b.resize(n, vec![Complex::new(0.0, 0.0); m]);
@@ -167,6 +254,17 @@ fn convolve_complex_2d(
     scaled_output
 }
 
+/// Computes the 2D convolution of two integer matrices using 2D FFT.
+/// Converts integers to complex numbers, performs complex 2D convolution, then converts back.
+/// There might be rounding issues due to precision loss if the input matrices
+/// are large.
+///
+/// # Arguments
+/// * `a` - First input matrix of integers
+/// * `b` - Second input matrix of integers
+///
+/// # Returns
+/// 2D convolution result as a matrix of integers
 pub fn convolve_int_2d(a: &Vec<&Vec<u64>>, b: &Vec<&Vec<u64>>) -> Vec<Vec<u64>> {
     let a_as_complex = a
         .iter()
